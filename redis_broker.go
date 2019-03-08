@@ -1,37 +1,32 @@
+// Copyright (c) 2019 Sick Yoon
+// This file is part of gocelery which is released under MIT license.
+// See file LICENSE for full license details.
+
 package gocelery
 
 import (
 	"encoding/json"
 	"fmt"
-	"sync"
 	"time"
 
-	"github.com/garyburd/redigo/redis"
+	"github.com/gomodule/redigo/redis"
 )
 
-// RedisCeleryBroker is CeleryBroker for Redis
+// RedisCeleryBroker is celery broker for redis
 type RedisCeleryBroker struct {
 	*redis.Pool
-	queueName   string
-	stopChannel chan bool
-	workWG      sync.WaitGroup
+	queueName string
 }
 
-// NewRedisPool creates pool of redis connections
-func NewRedisPool(host, pass string) *redis.Pool {
+// NewRedisPool creates pool of redis connections from given connection string
+func NewRedisPool(uri string) *redis.Pool {
 	return &redis.Pool{
 		MaxIdle:     3,
 		IdleTimeout: 240 * time.Second,
 		Dial: func() (redis.Conn, error) {
-			c, err := redis.Dial("tcp", host)
+			c, err := redis.DialURL(uri)
 			if err != nil {
 				return nil, err
-			}
-			if pass != "" {
-				if _, err = c.Do("AUTH", pass); err != nil {
-					c.Close()
-					return nil, err
-				}
 			}
 			return c, err
 		},
@@ -42,10 +37,10 @@ func NewRedisPool(host, pass string) *redis.Pool {
 	}
 }
 
-// NewRedisCeleryBroker creates new RedisCeleryBroker
-func NewRedisCeleryBroker(host, pass string) *RedisCeleryBroker {
+// NewRedisCeleryBroker creates new RedisCeleryBroker based on given uri
+func NewRedisCeleryBroker(uri string) *RedisCeleryBroker {
 	return &RedisCeleryBroker{
-		Pool:      NewRedisPool(host, pass),
+		Pool:      NewRedisPool(uri),
 		queueName: "celery",
 	}
 }
@@ -77,13 +72,13 @@ func (cb *RedisCeleryBroker) GetCeleryMessage() (*CeleryMessage, error) {
 		return nil, fmt.Errorf("null message received from redis")
 	}
 	messageList := messageJSON.([]interface{})
-	// check for celery message
 	if string(messageList[0].([]byte)) != "celery" {
 		return nil, fmt.Errorf("not a celery message: %v", messageList[0])
 	}
-	// parse
 	var message CeleryMessage
-	json.Unmarshal(messageList[1].([]byte), &message)
+	if err := json.Unmarshal(messageList[1].([]byte), &message); err != nil {
+		return nil, err
+	}
 	return &message, nil
 }
 

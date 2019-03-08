@@ -1,6 +1,11 @@
+// Copyright (c) 2019 Sick Yoon
+// This file is part of gocelery which is released under MIT license.
+// See file LICENSE for full license details.
+
 package gocelery
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"reflect"
@@ -14,7 +19,7 @@ type CeleryWorker struct {
 	numWorkers      int
 	registeredTasks map[string]interface{}
 	taskLock        sync.RWMutex
-	stopChannel     chan struct{}
+	cancel          context.CancelFunc
 	workWG          sync.WaitGroup
 }
 
@@ -24,14 +29,14 @@ func NewCeleryWorker(broker CeleryBroker, backend CeleryBackend, numWorkers int)
 		broker:          broker,
 		backend:         backend,
 		numWorkers:      numWorkers,
-		registeredTasks: make(map[string]interface{}),
+		registeredTasks: map[string]interface{}{},
 	}
 }
 
-// StartWorker starts celery worker
-func (w *CeleryWorker) StartWorker() {
-
-	w.stopChannel = make(chan struct{}, 1)
+// StartWorkerWithContext starts celery worker(s) with given parent context
+func (w *CeleryWorker) StartWorkerWithContext(ctx context.Context) {
+	var wctx context.Context
+	wctx, w.cancel = context.WithCancel(ctx)
 	w.workWG.Add(w.numWorkers)
 
 	for i := 0; i < w.numWorkers; i++ {
@@ -39,22 +44,20 @@ func (w *CeleryWorker) StartWorker() {
 			defer w.workWG.Done()
 			for {
 				select {
-				case <-w.stopChannel:
+				case <-wctx.Done():
 					return
 				default:
 
-					// process messages
+					// process task request
 					taskMessage, err := w.broker.GetTaskMessage()
 					if err != nil || taskMessage == nil {
 						continue
 					}
 
-					//log.Printf("WORKER %d task message received: %v\n", workerID, taskMessage)
-
 					// run task
 					resultMsg, err := w.RunTask(taskMessage)
 					if err != nil {
-						log.Println(err)
+						log.Printf("failed to run task message %s: %+v", taskMessage.ID, err)
 						continue
 					}
 					defer releaseResultMessage(resultMsg)
@@ -62,7 +65,7 @@ func (w *CeleryWorker) StartWorker() {
 					// push result to backend
 					err = w.backend.SetResult(taskMessage.ID, resultMsg)
 					if err != nil {
-						log.Println(err)
+						log.Printf("failed to push result: %+v", err)
 						continue
 					}
 				}
@@ -71,11 +74,19 @@ func (w *CeleryWorker) StartWorker() {
 	}
 }
 
+// StartWorker starts celery workers
+func (w *CeleryWorker) StartWorker() {
+	w.StartWorkerWithContext(context.Background())
+}
+
 // StopWorker stops celery workers
 func (w *CeleryWorker) StopWorker() {
-	for i := 0; i < w.numWorkers; i++ {
-		w.stopChannel <- struct{}{}
-	}
+	w.cancel()
+	w.workWG.Wait()
+}
+
+// StopWait waits for celery workers to terminate
+func (w *CeleryWorker) StopWait() {
 	w.workWG.Wait()
 }
 
@@ -115,7 +126,6 @@ func (w *CeleryWorker) RunTask(message *TaskMessage) (*ResultMessage, error) {
 	// convert to task interface
 	taskInterface, ok := task.(CeleryTask)
 	if ok {
-		//log.Println("using task interface")
 		if err := taskInterface.ParseKwargs(message.Kwargs); err != nil {
 			return nil, err
 		}
@@ -125,7 +135,6 @@ func (w *CeleryWorker) RunTask(message *TaskMessage) (*ResultMessage, error) {
 		}
 		return getResultMessage(val), err
 	}
-	//log.Println("using reflection")
 
 	// use reflection to execute function ptr
 	taskFunc := reflect.ValueOf(task)
@@ -140,6 +149,7 @@ func runTaskFunc(taskFunc *reflect.Value, message *TaskMessage) (*ResultMessage,
 	if numArgs != messageNumArgs {
 		return nil, fmt.Errorf("Number of task arguments %d does not match number of message arguments %d", numArgs, messageNumArgs)
 	}
+
 	// construct arguments
 	in := make([]reflect.Value, messageNumArgs)
 	for i, arg := range message.Args {
@@ -159,6 +169,6 @@ func runTaskFunc(taskFunc *reflect.Value, message *TaskMessage) (*ResultMessage,
 	if len(res) == 0 {
 		return nil, nil
 	}
-	//defer releaseResultMessage(resultMessage)
+
 	return getReflectionResultMessage(&res[0]), nil
 }

@@ -1,7 +1,12 @@
+// Copyright (c) 2019 Sick Yoon
+// This file is part of gocelery which is released under MIT license.
+// See file LICENSE for full license details.
+
 package gocelery
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/streadway/amqp"
@@ -57,7 +62,7 @@ func NewAMQPConnection(host string) (*amqp.Connection, *amqp.Channel) {
 	if err != nil {
 		panic(err)
 	}
-	//defer connection.Close()
+
 	channel, err := connection.Channel()
 	if err != nil {
 		panic(err)
@@ -67,8 +72,11 @@ func NewAMQPConnection(host string) (*amqp.Connection, *amqp.Channel) {
 
 // NewAMQPCeleryBroker creates new AMQPCeleryBroker
 func NewAMQPCeleryBroker(host string) *AMQPCeleryBroker {
-	conn, channel := NewAMQPConnection(host)
-	// ensure exchange is initialized
+	return NewAMQPCeleryBrokerByConnAndChannel(NewAMQPConnection(host))
+}
+
+// NewAMQPCeleryBrokerByConnAndChannel creates new AMQPCeleryBroker using AMQP conn and channel
+func NewAMQPCeleryBrokerByConnAndChannel(conn *amqp.Connection, channel *amqp.Channel) *AMQPCeleryBroker {
 	broker := &AMQPCeleryBroker{
 		Channel:    channel,
 		connection: conn,
@@ -104,7 +112,6 @@ func (b *AMQPCeleryBroker) StartConsumingChannel() error {
 // SendCeleryMessage sends CeleryMessage to broker
 func (b *AMQPCeleryBroker) SendCeleryMessage(message *CeleryMessage) error {
 	taskMessage := message.GetTaskMessage()
-	//log.Printf("sending task ID %s\n", taskMessage.ID)
 	queueName := "celery"
 	_, err := b.QueueDeclare(
 		queueName, // name
@@ -153,13 +160,17 @@ func (b *AMQPCeleryBroker) SendCeleryMessage(message *CeleryMessage) error {
 
 // GetTaskMessage retrieves task message from AMQP queue
 func (b *AMQPCeleryBroker) GetTaskMessage() (*TaskMessage, error) {
-	delivery := <-b.consumingChannel
-	delivery.Ack(false)
-	var taskMessage TaskMessage
-	if err := json.Unmarshal(delivery.Body, &taskMessage); err != nil {
-		return nil, err
+	select {
+	case delivery := <-b.consumingChannel:
+		deliveryAck(delivery)
+		var taskMessage TaskMessage
+		if err := json.Unmarshal(delivery.Body, &taskMessage); err != nil {
+			return nil, err
+		}
+		return &taskMessage, nil
+	default:
+		return nil, fmt.Errorf("consuming channel is empty")
 	}
-	return &taskMessage, nil
 }
 
 // CreateExchange declares AMQP exchange with stored configuration
